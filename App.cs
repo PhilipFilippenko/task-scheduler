@@ -536,15 +536,79 @@ public class MainWindow : Window
 
         row.MouseLeftButtonUp += (s, e) => OpenSheet(t);
         Hover(row);
-        var del = new MenuItem { Header = "Delete" };
-        del.Click += (s, e) => { tasks.Remove(t); Save(); Render(); };
-        var shift = new MenuItem { Header = "Push back 15 min" };
-        shift.Click += (s, e) => { t.Start = t.Start.AddMinutes(15); t.Notified = false; Save(); Tick(); };
-        row.ContextMenu = new ContextMenu { Items = { shift, del } };
+        row.MouseRightButtonUp += (s, e) =>
+        {
+            e.Handled = true;
+            ShowMenu(
+                ("", "Edit", White, () => OpenSheet(t)),
+                (t.Done ? "" : "", t.Done ? "Mark as not done" : "Mark as done", White, () => { t.Done = !t.Done; Save(); Render(); }),
+                ("", "Push back 15 min", White, () => { t.Start = t.Start.AddMinutes(15); t.Notified = false; Save(); Tick(); }),
+                ("", "Delete", B("#FF6B6B"), () => { tasks.Remove(t); Save(); Render(); }));
+        };
         return row;
     }
 
+    // glass right-click menu at the mouse: icon + label rows, fades and grows in, closes on any outside click
+    static void ShowMenu(params (string glyph, string text, Brush color, Action act)[] items)
+    {
+        var popup = new System.Windows.Controls.Primitives.Popup { AllowsTransparency = true, StaysOpen = false, Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint, PopupAnimation = System.Windows.Controls.Primitives.PopupAnimation.None };
+        var list = new StackPanel();
+        for (int i = 0; i < items.Length; i++)
+        {
+            var (glyph, text, color, act) = items[i];
+            if (i == items.Length - 1 && items.Length > 1) list.Children.Add(new Border { Height = 1, Background = B("#1FFFFFFF"), Margin = new Thickness(10, 4, 10, 4) }); // keep Delete apart
+            var hover = new SolidColorBrush(Colors.Transparent);
+            var row = new Border
+            {
+                Background = hover, CornerRadius = new CornerRadius(10), Padding = new Thickness(12, 9, 18, 9), Cursor = Cursors.Hand,
+                Child = new StackPanel { Orientation = Orientation.Horizontal, Children = {
+                    new TextBlock { Text = glyph, FontFamily = IconFont, FontSize = 15, Foreground = color, Width = 22, VerticalAlignment = VerticalAlignment.Center },
+                    new TextBlock { Text = text, FontSize = 14, Foreground = color, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center } } }
+            };
+            row.MouseEnter += (s, e) => hover.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(Color.FromArgb(0x26, 255, 255, 255), TimeSpan.FromMilliseconds(100)));
+            row.MouseLeave += (s, e) => hover.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(Colors.Transparent, TimeSpan.FromMilliseconds(150)));
+            row.MouseLeftButtonUp += (s, e) => { e.Handled = true; popup.IsOpen = false; act(); };
+            list.Children.Add(row);
+        }
+        var scale = new ScaleTransform(0.92, 0.92);
+        var card = new Border
+        {
+            Background = Glass.Solid, BorderBrush = Glass.Rim, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(16), Padding = new Thickness(5), Margin = new Thickness(8, 6, 14, 16),
+            MinWidth = 200, RenderTransform = scale, RenderTransformOrigin = new Point(0, 0), Opacity = 0, Child = list,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18, ShadowDepth = 4, Opacity = 0.5 }
+        };
+        popup.Child = card;
+        popup.IsOpen = true;
+        Anim(card, OpacityProperty, 0, 1, 140);
+        Anim(scale, ScaleTransform.ScaleXProperty, 0.92, 1, 160);
+        Anim(scale, ScaleTransform.ScaleYProperty, 0.92, 1, 160);
+    }
+
     // ---- add / edit sheet ----
+    // shown when Add is pressed with no name: bright hint, thick underline, a shake and a dark chip under the field
+    readonly Border sWarn = new()
+    {
+        Background = B("#8C000000"), CornerRadius = new CornerRadius(10), Padding = new Thickness(10, 4, 10, 5), Margin = new Thickness(0, 8, 0, 0),
+        HorizontalAlignment = HorizontalAlignment.Left, Visibility = Visibility.Collapsed,
+        Child = new TextBlock { Text = "⚠  Type a name to add the task", Foreground = Brushes.White, FontSize = 13, FontWeight = FontWeights.SemiBold }
+    };
+    void NameWarning(bool on)
+    {
+        sHint.Text = on ? "Name required" : "Task name";
+        sHint.Foreground = on ? White : B("#80FFFFFF");
+        sUnderline.BorderBrush = on ? White : B("#80FFFFFF");
+        sUnderline.BorderThickness = new Thickness(0, 0, 0, on ? 3 : 1.5);
+        if (!on) { sWarn.Visibility = Visibility.Collapsed; return; }
+        sWarn.Visibility = Visibility.Visible;
+        Anim(sWarn, OpacityProperty, 0, 1, 200);
+        var tt = sUnderline.RenderTransform as TranslateTransform ?? new TranslateTransform();
+        sUnderline.RenderTransform = tt;
+        var shake = new DoubleAnimationUsingKeyFrames { Duration = TimeSpan.FromMilliseconds(420) };
+        double[] xs = { -12, 12, -9, 9, -5, 5, 0 };
+        for (int i = 0; i < xs.Length; i++) shake.KeyFrames.Add(new LinearDoubleKeyFrame(xs[i], KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(60 * (i + 1)))));
+        tt.BeginAnimation(TranslateTransform.XProperty, shake);
+    }
+
     void BuildSheet()
     {
         // red header: ✕, big circle with letter, time range + title
@@ -558,7 +622,7 @@ public class MainWindow : Window
         titleGrid.Children.Add(sHint); titleGrid.Children.Add(sTitle);
         sUnderline.Child = titleGrid; // own underline: the TextBox template turns its border blue on focus
         var headInfo = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(18, 0, 0, 0) };
-        headInfo.Children.Add(sRange); headInfo.Children.Add(sUnderline);
+        headInfo.Children.Add(sRange); headInfo.Children.Add(sUnderline); headInfo.Children.Add(sWarn);
         var headRow = new Grid { Margin = new Thickness(0, 8, 0, 0) };
         headRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         headRow.ColumnDefinitions.Add(new ColumnDefinition());
@@ -569,7 +633,7 @@ public class MainWindow : Window
         {
             sHint.Visibility = sTitle.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
             sLetter.Text = sIcon ?? Glyph(sTitle.Text);
-            sUnderline.BorderBrush = B("#80FFFFFF"); sHint.Foreground = B("#80FFFFFF");
+            NameWarning(false);
             if (!syncing) RenderSuggestions();
         };
 
@@ -668,6 +732,7 @@ public class MainWindow : Window
         }
         syncing = true; sTitle.Text = t?.Title ?? ""; syncing = false;
         sIcon = t?.Icon;
+        NameWarning(false);
         sLetter.Text = sIcon ?? Glyph(sTitle.Text); // TextChanged doesn't fire when "" → ""
         sSaveText.Text = t == null ? "Add" : "Save";
         sDelete.Visibility = t == null ? Visibility.Collapsed : Visibility.Visible;
@@ -691,7 +756,7 @@ public class MainWindow : Window
     void SaveSheet()
     {
         var title = sTitle.Text.Trim();
-        if (title.Length == 0) { sUnderline.BorderBrush = White; sHint.Foreground = White; sTitle.Focus(); return; }
+        if (title.Length == 0) { NameWarning(true); sTitle.Focus(); return; }
         var start = sDate + sStart;
         var t = editing ?? new TaskItem();
         if (editing == null) tasks.Add(t);
