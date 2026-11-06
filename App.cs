@@ -39,6 +39,7 @@ public class Settings
     public int Monitor { get; set; }          // floating timer screen: 0 leftmost, 1 main, 2 rightmost
     public int DefaultMin { get; set; } = 60; // length of a new task
     public string Accent { get; set; } = "#E2B44E"; // app colour, see Glass.Palette
+    public bool? Autostart { get; set; }      // null = never chosen; mirrors the HKCU Run entry
 
     static readonly string FilePath = System.IO.Path.Combine(AppContext.BaseDirectory, "settings.json");
     public static readonly Settings Cur = Load();
@@ -55,6 +56,22 @@ public class Settings
     }
 }
 
+// start with Windows: per-user Run entry, no admin rights needed
+static class Autostart
+{
+    const string Key = @"Software\Microsoft\Windows\CurrentVersion\Run", Name = "TaskScheduler";
+    public static string Command => $"\"{Environment.ProcessPath}\" --tray";
+    public static void Set(bool on)
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(Key);
+            if (on) k.SetValue(Name, Command); else k.DeleteValue(Name, false);
+        }
+        catch { } // locked-down registry: the toggle just won't stick, nothing else breaks
+    }
+}
+
 static class Program
 {
     [STAThread]
@@ -67,7 +84,14 @@ static class Program
         using var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "TaskTimeline_show");
         using var newSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "TaskTimeline_new");
         bool wantNew = args.Contains("--new");
-        if (!first) { (wantNew ? newSignal : showSignal).Set(); return; } // already running: hand the request over
+        if (!first)
+        {
+            if (!args.Contains("--tray")) (wantNew ? newSignal : showSignal).Set(); // already running: hand the request over
+            return; // a second autostart entry must not pop the window open at logon
+        }
+        // started by a logon entry before autostart was ever set here (old scheduled-task setup): adopt it as "on"
+        if (Settings.Cur.Autostart == null && args.Contains("--tray")) { Settings.Cur.Autostart = true; Settings.Cur.Save(); }
+        if (Settings.Cur.Autostart == true) Autostart.Set(true); // rewrites the path, so a moved exe keeps starting
 
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var win = new MainWindow();
@@ -949,6 +973,8 @@ public class MainWindow : Window
 
         var test = Clickable(Glass.Card(new Border { Padding = new Thickness(12, 5, 12, 5), Child = new TextBlock { Text = "▶  Test", Foreground = White, FontSize = 13 } }, 14), Toast.PlayChime);
         var body = new StackPanel { Margin = new Thickness(16, 6, 16, 16) };
+        body.Children.Add(Group("General",
+            ToggleRow("Start with Windows", "Opens in the tray when you sign in", s.Autostart == true, v => { s.Autostart = v; s.Save(); Autostart.Set(v); })));
         body.Children.Add(Group("Appearance", Labeled("Accent colour", null, Swatches())));
         body.Children.Add(Group("Notifications",
             ToggleRow("Pop-up cards", "A card in the corner when a task starts", s.Popups, v => { s.Popups = v; s.Save(); }),
