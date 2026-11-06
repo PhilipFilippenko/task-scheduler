@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <AssemblyTitle>Task Scheduler</AssemblyTitle>
+    <Product>Task Scheduler</Product>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="versions\**" />
+    <None Remove="versions\**" />
+  </ItemGroup>
+</Project>

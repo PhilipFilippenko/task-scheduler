@@ -1,0 +1,9 @@
+# build output
+bin/
+obj/
+# published app folder also holds personal data (tasks.json, settings.json)
+app/
+# old local backup copies; history lives in git now
+versions/
+*.user
+.vs/
