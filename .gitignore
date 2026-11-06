@@ -7,3 +7,5 @@ app/
 versions/
 *.user
 .vs/
+# local release build (uploaded to GitHub Releases, not committed)
+release/
