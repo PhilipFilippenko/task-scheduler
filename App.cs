@@ -56,6 +56,63 @@ public class Settings
     }
 }
 
+// a saved sequence of tasks that can be laid onto any day in one click
+public class RoutineStep
+{
+    public string Title { get; set; } = "";
+    public int Minutes { get; set; } = 30;
+    public string Icon { get; set; }
+}
+public class Routine
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = "";
+    public List<RoutineStep> Steps { get; set; } = new();
+    public int TotalMinutes => Steps.Sum(s => s.Minutes);
+
+    static readonly string FilePath = System.IO.Path.Combine(AppContext.BaseDirectory, "routines.json");
+    public static List<Routine> All = Load();
+    static List<Routine> Load()
+    {
+        if (!File.Exists(FilePath)) return new();
+        try { return JsonSerializer.Deserialize<List<Routine>>(File.ReadAllText(FilePath)) ?? new(); }
+        catch
+        {
+            File.Move(FilePath, FilePath + ".broken-" + DateTime.Now.ToString("yyyyMMdd-HHmmss")); // keep it, don't overwrite with nothing
+            return new();
+        }
+    }
+    public static void SaveAll()
+    {
+        var tmp = FilePath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(All, new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(tmp, FilePath, true);
+    }
+
+    // back-to-back tasks from `start`
+    public List<TaskItem> Expand(DateTime start)
+    {
+        var list = new List<TaskItem>();
+        foreach (var s in Steps)
+        {
+            list.Add(new TaskItem { Title = s.Title, Minutes = s.Minutes, Icon = s.Icon, Start = start });
+            start = start.AddMinutes(s.Minutes);
+        }
+        return list;
+    }
+
+    // today: now rounded up to 5 min, but never on top of tasks already planned; other days: after the last task, else 09:00
+    public static DateTime StartFor(DateTime day, DateTime now, DateTime? lastEnd)
+    {
+        if (day.Date == now.Date)
+        {
+            var t = now.Date.AddMinutes(Math.Ceiling(now.TimeOfDay.TotalMinutes / 5) * 5);
+            return lastEnd > t ? lastEnd.Value : t;
+        }
+        return lastEnd ?? day.Date.AddHours(9);
+    }
+}
+
 // start with Windows: per-user Run entry, no admin rights needed
 static class Autostart
 {
@@ -127,6 +184,13 @@ static class Program
         Trace.Assert(Glass.AccentColor == Colors.Red && Glass.Accent.GradientStops[0].Color.G > 0 && Glass.Accent.GradientStops[1].Color.R < 255 && Glass.AccentDim.Color.A == 0x99);
         Glass.SetAccent("not a colour");
         Trace.Assert(Glass.AccentColor == (Color)ColorConverter.ConvertFromString(Glass.Palette[0].hex));
+        var morning = new Routine { Name = "Morning", Steps = { new() { Title = "Reading", Minutes = 20 }, new() { Title = "Mail", Minutes = 10 }, new() { Title = "Writing", Minutes = 20 } } };
+        var day = new DateTime(2026, 11, 11);
+        var ex = morning.Expand(day.AddHours(18));
+        Trace.Assert(ex.Count == 3 && ex[1].Start == day.AddHours(18).AddMinutes(20) && ex[2].End() == day.AddHours(18).AddMinutes(50) && morning.TotalMinutes == 50);
+        Trace.Assert(Routine.StartFor(day, day.AddHours(18).AddMinutes(2), null) == day.AddHours(18).AddMinutes(5));            // round up to 5 min
+        Trace.Assert(Routine.StartFor(day, day.AddHours(18), day.AddHours(19)) == day.AddHours(19));                           // after planned tasks
+        Trace.Assert(Routine.StartFor(day.AddDays(1), day.AddHours(18), null) == day.AddDays(1).AddHours(9));                   // other day, empty
         Trace.Assert(OverlayWindow.Clock(TimeSpan.FromSeconds(65)) == "01:05" && OverlayWindow.Clock(new TimeSpan(1, 2, 3)) == "1:02:03");
         Console.WriteLine("selftest ok");
     }
@@ -268,11 +332,19 @@ public class MainWindow : Window
             Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 18, ShadowDepth = 3, Opacity = 0.5 },
             Child = new TextBlock { Text = "+", FontSize = 34, Foreground = White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, -4, 0, 0) }
         }), () => OpenSheet(null));
+        // routines: smaller glass button left of "+"
+        var rtBtn = Clickable(Glass.Card(new Border
+        {
+            Width = 50, Height = 50, ToolTip = "Routines: saved task sequences",
+            HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 96, 28),
+            Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 14, ShadowDepth = 2, Opacity = 0.45 },
+            Child = new TextBlock { Text = "\uE8EE", FontFamily = IconFont, FontSize = 20, Foreground = Accent, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }
+        }, 25), OpenRoutines);
 
         BuildSheet();
         var body = new Grid();
         BuildCalOverlay();
-        body.Children.Add(new Grid { Effect = behind, Children = { main, fab } }); body.Children.Add(sheet); body.Children.Add(calOverlay); body.Children.Add(setOverlay); body.Children.Add(iconOverlay);
+        body.Children.Add(new Grid { Effect = behind, Children = { main, fab, rtBtn } }); body.Children.Add(sheet); body.Children.Add(calOverlay); body.Children.Add(setOverlay); body.Children.Add(iconOverlay); body.Children.Add(rtOverlay);
         var root = new DockPanel();
         var bar = TitleBar();
         DockPanel.SetDock(bar, Dock.Top);
@@ -292,6 +364,7 @@ public class MainWindow : Window
         PreviewKeyDown += (s, e) =>
         {
             if (iconOpen) { if (e.Key == Key.Escape) { CloseIcons(); e.Handled = true; } return; }
+            if (rtOpen) { if (e.Key == Key.Escape) { if (rtEditing) ShowRoutineList(); else CloseRoutines(); e.Handled = true; } return; }
             if (setOpen) { if (e.Key == Key.Escape) { CloseSettings(); e.Handled = true; } return; }
             if (calOpen) { if (e.Key == Key.Escape) { CloseCal(); e.Handled = true; } return; }
             if (!sheetOpen) { if (e.Key == Key.N && Keyboard.Modifiers == ModifierKeys.Control) OpenSheet(null); return; }
@@ -307,6 +380,16 @@ public class MainWindow : Window
         menu.Items.Add("New task", null, (s, e) => ShowNew());
         overlayItem = new WF.ToolStripMenuItem("Floating timer", null, (s, e) => ToggleOverlay());
         menu.Items.Add(overlayItem);
+        // one-click routines straight from the tray; list rebuilt each time the menu opens
+        var rtMenu = new WF.ToolStripMenuItem("Start routine");
+        rtMenu.DropDownItems.Add("(none)");
+        menu.Opening += (s, e) =>
+        {
+            rtMenu.DropDownItems.Clear();
+            foreach (var r in Routine.All) { var rr = r; rtMenu.DropDownItems.Add($"{r.Name}  ({Dur(r.TotalMinutes)})", null, (s2, e2) => { selected = DateTime.Today; StartRoutine(rr); ShowMe(); }); }
+            rtMenu.DropDownItems.Add(Routine.All.Count == 0 ? "Create a routine…" : "Edit routines…", null, (s2, e2) => { ShowMe(); OpenRoutines(); });
+        };
+        menu.Items.Add(rtMenu);
         menu.Items.Add("Settings", null, (s, e) => { ShowMe(); OpenSettings(); });
         menu.Items.Add("Exit", null, (s, e) => Exit());
         tray.ContextMenuStrip = menu;
@@ -967,7 +1050,7 @@ public class MainWindow : Window
     void BlurSheet()
     {
         sheet.Effect = sheetBlur;
-        Anim(sheetBlur, System.Windows.Media.Effects.BlurEffect.RadiusProperty, null, calOpen || iconOpen || setOpen ? 24 : 0, 250);
+        Anim(sheetBlur, System.Windows.Media.Effects.BlurEffect.RadiusProperty, null, calOpen || iconOpen || setOpen || rtOpen ? 24 : 0, 250);
     }
 
     void CloseIcons()
@@ -976,6 +1059,182 @@ public class MainWindow : Window
         Anim(iconOverlay, OpacityProperty, null, 0, 200, () => { if (!iconOpen) iconOverlay.Visibility = Visibility.Collapsed; });
         if (iconOverlay.RenderTransform is TranslateTransform tt) Anim(tt, TranslateTransform.YProperty, null, 40, 200);
         BlurSheet();
+    }
+
+    // ---- routines: saved task sequences; list view (start / edit) and an editor, in one full-window panel ----
+    readonly Border rtOverlay = new() { Background = Card, Visibility = Visibility.Collapsed };
+    bool rtOpen, rtEditing;
+
+    void OpenRoutines()
+    {
+        if (calOpen) CloseCal();
+        if (setOpen) CloseSettings();
+        rtOpen = true;
+        ShowRoutineList();
+        rtOverlay.Visibility = Visibility.Visible;
+        SlideIn(rtOverlay, 40, 280);
+        Anim(behind, System.Windows.Media.Effects.BlurEffect.RadiusProperty, null, 24, 280);
+        BlurSheet();
+    }
+
+    void CloseRoutines()
+    {
+        rtOpen = false;
+        Anim(rtOverlay, OpacityProperty, null, 0, 200, () => { if (!rtOpen) rtOverlay.Visibility = Visibility.Collapsed; });
+        if (rtOverlay.RenderTransform is TranslateTransform tt) Anim(tt, TranslateTransform.YProperty, null, 40, 200);
+        if (!sheetOpen) Anim(behind, System.Windows.Media.Effects.BlurEffect.RadiusProperty, null, 0, 250);
+        BlurSheet();
+    }
+
+    // lay the routine onto the selected day and show it
+    public void StartRoutine(Routine r)
+    {
+        var day = selected;
+        var last = tasks.Where(x => x.Start.Date == day).Select(x => (DateTime?)x.End()).Max();
+        tasks.AddRange(r.Expand(Routine.StartFor(day, DateTime.Now, last)));
+        Save();
+        if (rtOpen) CloseRoutines();
+        lastDay = default; // replay the slide-in so the new tasks are noticed
+        Tick();
+    }
+
+    UIElement PanelTop(string title, Action close, UIElement right = null)
+    {
+        var x = Clickable(new Border
+        {
+            Width = 46, Height = 46, CornerRadius = new CornerRadius(23), Background = Field, BorderBrush = Glass.Rim, BorderThickness = new Thickness(1), ToolTip = "Close (Esc)",
+            Child = new TextBlock { Text = "✕", FontSize = 20, Foreground = White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }
+        }, close);
+        var top = new DockPanel { Margin = new Thickness(20, 14, 20, 6) };
+        DockPanel.SetDock(x, Dock.Left); top.Children.Add(x);
+        if (right != null) { DockPanel.SetDock(right, Dock.Right); top.Children.Add(right); }
+        top.Children.Add(new TextBlock { Text = title, Foreground = White, FontSize = 22, FontWeight = FontWeights.Bold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(16, 0, 0, 0) });
+        return top;
+    }
+
+    static Border Chip(string text, string glyph = null) => Glass.Card(new Border
+    {
+        Padding = new Thickness(14, 7, 14, 7), VerticalAlignment = VerticalAlignment.Center,
+        Child = new StackPanel { Orientation = Orientation.Horizontal, Children = {
+            new TextBlock { Text = glyph ?? "", FontFamily = IconFont, FontSize = 13, Foreground = Accent, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, glyph == null ? 0 : 8, 0) },
+            new TextBlock { Text = text, FontSize = 14, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center } } }
+    }, 16);
+
+    void ShowRoutineList()
+    {
+        rtEditing = false;
+        var body = new StackPanel { Margin = new Thickness(16, 10, 16, 16) };
+        string dayName = selected == DateTime.Today ? "today" : selected.ToString("ddd d MMM");
+        body.Children.Add(new TextBlock { Text = $"Start adds the steps to {dayName}, back to back" + (selected == DateTime.Today ? ", from now." : "."), Foreground = Sub, FontSize = 13, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(6, 0, 6, 10) });
+        if (Routine.All.Count == 0)
+            body.Children.Add(new TextBlock { Text = "No routines yet.\nPress New, or save a day you've already planned.", Foreground = Sub, FontSize = 15, TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 30, 0, 16) });
+        foreach (var r in Routine.All)
+        {
+            var info = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0) };
+            info.Children.Add(new TextBlock { Text = r.Name, Foreground = White, FontSize = 18, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+            info.Children.Add(new TextBlock { Text = $"{r.Steps.Count} {(r.Steps.Count == 1 ? "step" : "steps")} · {Dur(r.TotalMinutes)}", Foreground = Accent, FontSize = 13, Margin = new Thickness(0, 2, 0, 4) });
+            info.Children.Add(new TextBlock { Text = string.Join("  →  ", r.Steps.Select(s => $"{s.Title} {s.Minutes}m")), Foreground = Sub, FontSize = 13, TextWrapping = TextWrapping.Wrap });
+            var play = Clickable(Glass.Button(new Border
+            {
+                Width = 50, Height = 50, CornerRadius = new CornerRadius(25), ToolTip = "Start", VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock { Text = "", FontFamily = IconFont, FontSize = 18, Foreground = White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(3, 0, 0, 0) }
+            }), () => StartRoutine(r));
+            var row = new DockPanel();
+            DockPanel.SetDock(play, Dock.Right);
+            row.Children.Add(play); row.Children.Add(info);
+            var card = Clickable(Glass.Card(new Border { Padding = new Thickness(18, 14, 14, 14), Margin = new Thickness(0, 0, 0, 10), Child = row, ToolTip = "Edit" }, 24), () => ShowRoutineEditor(r));
+            body.Children.Add(card);
+        }
+        if (tasks.Any(t => t.Start.Date == selected))
+        {
+            var fromDay = Clickable(Chip($"Save {dayName}'s tasks as a routine", ""), () => ShowRoutineEditor(null, true));
+            fromDay.HorizontalAlignment = HorizontalAlignment.Center; fromDay.Margin = new Thickness(0, 6, 0, 0);
+            body.Children.Add(fromDay);
+        }
+        var newBtn = Clickable(Chip("New", ""), () => ShowRoutineEditor(null));
+        var dock = new DockPanel();
+        var top = PanelTop("Routines", CloseRoutines, newBtn);
+        DockPanel.SetDock(top, Dock.Top);
+        dock.Children.Add(top);
+        dock.Children.Add(new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Content = body });
+        rtOverlay.Child = dock;
+    }
+
+    // editor works on a copy; Save writes it back (new routine is appended)
+    void ShowRoutineEditor(Routine existing, bool fromDay = false)
+    {
+        rtEditing = true;
+        var steps = existing?.Steps.Select(s => new RoutineStep { Title = s.Title, Minutes = s.Minutes, Icon = s.Icon }).ToList() ?? new();
+        if (fromDay) steps = tasks.Where(t => t.Start.Date == selected).OrderBy(t => t.Start).Select(t => new RoutineStep { Title = t.Title, Minutes = t.Minutes, Icon = t.Icon }).ToList();
+        if (steps.Count == 0) steps.Add(new RoutineStep { Minutes = 20 });
+
+        TextBox Box(double size, string text) => new() { Text = text, Background = Brushes.Transparent, Foreground = Brushes.White, CaretBrush = Brushes.White, BorderThickness = new Thickness(0), FontSize = size, VerticalAlignment = VerticalAlignment.Center };
+        var name = Box(22, existing?.Name ?? "");
+        name.FontWeight = FontWeights.Bold;
+        var nameHint = new TextBlock { Text = "Routine name", Foreground = B("#66FFFFFF"), FontSize = 22, FontWeight = FontWeights.Bold, IsHitTestVisible = false, Margin = new Thickness(2, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+        name.TextChanged += (s, e) => nameHint.Visibility = name.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        nameHint.Visibility = name.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        var nameCard = Glass.Card(new Border { Padding = new Thickness(18, 12, 18, 12), Child = new Grid { Children = { nameHint, name } } }, 22);
+
+        var total = new TextBlock { Foreground = Accent, FontSize = 14, VerticalAlignment = VerticalAlignment.Center };
+        void Total() => total.Text = Dur(steps.Sum(s => s.Minutes));
+        var list = new StackPanel();
+        void Rows()
+        {
+            list.Children.Clear();
+            foreach (var step in steps)
+            {
+                var st = step;
+                var glyph = new TextBlock { Text = st.Icon ?? Glyph(st.Title), FontFamily = IconFont, FontSize = 18, Foreground = Accent, Width = 28, VerticalAlignment = VerticalAlignment.Center };
+                var title = Box(16, st.Title);
+                var titleHint = new TextBlock { Text = "Step", Foreground = B("#66FFFFFF"), FontSize = 16, IsHitTestVisible = false, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 0, 0), Visibility = st.Title.Length == 0 ? Visibility.Visible : Visibility.Collapsed };
+                title.TextChanged += (s, e) => { st.Title = title.Text; titleHint.Visibility = title.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; if (st.Icon == null) glyph.Text = Glyph(st.Title); };
+                var min = Box(16, st.Minutes.ToString()); min.Width = 44; min.HorizontalContentAlignment = HorizontalAlignment.Right;
+                min.TextChanged += (s, e) => { if (int.TryParse(min.Text.Trim(), out var m) && m > 0 && m <= 24 * 60) { st.Minutes = m; Total(); } };
+                var remove = Clickable(new TextBlock { Text = "", FontFamily = IconFont, FontSize = 12, Foreground = Sub, Padding = new Thickness(10, 6, 2, 6), VerticalAlignment = VerticalAlignment.Center, ToolTip = "Remove step", Background = Brushes.Transparent },
+                                       () => { if (steps.Count > 1) { steps.Remove(st); Rows(); Total(); } });
+                var right = new StackPanel { Orientation = Orientation.Horizontal, Children = { min, new TextBlock { Text = "min", Foreground = Sub, FontSize = 14, Margin = new Thickness(4, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center }, remove } };
+                var row = new DockPanel();
+                DockPanel.SetDock(glyph, Dock.Left); DockPanel.SetDock(right, Dock.Right);
+                row.Children.Add(glyph); row.Children.Add(right); row.Children.Add(new Grid { Children = { titleHint, title } });
+                list.Children.Add(Glass.Card(new Border { Padding = new Thickness(16, 10, 12, 10), Margin = new Thickness(0, 0, 0, 8), Child = row }, 20));
+            }
+        }
+        Rows(); Total();
+
+        var addStep = Clickable(Chip("Add step", ""), () => { steps.Add(new RoutineStep { Minutes = 20 }); Rows(); Total(); });
+        var stepsHead = new DockPanel { Margin = new Thickness(8, 18, 8, 10) };
+        DockPanel.SetDock(total, Dock.Right); stepsHead.Children.Add(total);
+        stepsHead.Children.Add(new TextBlock { Text = "Steps", Foreground = White, FontSize = 20, FontWeight = FontWeights.Bold });
+
+        var warn = new TextBlock { Text = "⚠  Give it a name and at least one named step", Foreground = White, FontSize = 13, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8), HorizontalAlignment = HorizontalAlignment.Center, Visibility = Visibility.Collapsed };
+        var save = Clickable(Glass.Button(new Border { Height = 54, CornerRadius = new CornerRadius(27), Child = new TextBlock { Text = existing == null ? "Save routine" : "Save", Foreground = White, FontSize = 18, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } }), () =>
+        {
+            var named = steps.Where(s => s.Title.Trim().Length > 0).ToList();
+            if (name.Text.Trim().Length == 0 || named.Count == 0) { warn.Visibility = Visibility.Visible; Anim(warn, OpacityProperty, 0, 1, 200); (name.Text.Trim().Length == 0 ? name : null)?.Focus(); return; }
+            foreach (var s in named) s.Title = s.Title.Trim();
+            var r = existing ?? new Routine();
+            r.Name = name.Text.Trim(); r.Steps = named;
+            if (existing == null) Routine.All.Add(r);
+            Routine.SaveAll();
+            ShowRoutineList();
+        });
+        var bottom = new StackPanel { Margin = new Thickness(20, 4, 20, 16), Children = { warn, save } };
+        if (existing != null)
+            bottom.Children.Add(Clickable(new Border { Background = Brushes.Transparent, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 12, 0, 0), Child = new TextBlock { Text = "Delete routine", Foreground = B("#FF6B6B"), FontSize = 15 } },
+                () => { Routine.All.Remove(existing); Routine.SaveAll(); ShowRoutineList(); }));
+
+        var body = new StackPanel { Margin = new Thickness(16, 10, 16, 16), Children = { nameCard, stepsHead, list } };
+        addStep.HorizontalAlignment = HorizontalAlignment.Left; addStep.Margin = new Thickness(4, 2, 0, 0);
+        body.Children.Add(addStep);
+        var dock = new DockPanel();
+        var top = PanelTop(existing == null ? "New routine" : "Edit routine", ShowRoutineList);
+        DockPanel.SetDock(top, Dock.Top); DockPanel.SetDock(bottom, Dock.Bottom);
+        dock.Children.Add(top); dock.Children.Add(bottom);
+        dock.Children.Add(new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Content = body });
+        rtOverlay.Child = dock;
+        SlideIn(dock, 20, 220);
+        if (existing == null && !fromDay) Dispatcher.BeginInvoke(() => name.Focus(), DispatcherPriority.Input);
     }
 
     // ---- settings: full-window panel like the calendar; rebuilt on every open so it always shows current state ----
